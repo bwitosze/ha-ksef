@@ -9,13 +9,14 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
+    SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
@@ -23,6 +24,7 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.util import slugify
 
 from .api import KsefApi, KsefAuthError, KsefError
 from .const import (
@@ -32,7 +34,6 @@ from .const import (
     CONF_NOTIFY_SALES,
     CONF_NOTIFY_SERVICE,
     CONF_SCAN_INTERVAL_MINUTES,
-    DEFAULT_NOTIFY_SERVICE,
     DEFAULT_SCAN_INTERVAL_MINUTES,
     DOMAIN,
     ENV_DEMO,
@@ -40,7 +41,11 @@ from .const import (
     ENV_TEST,
     MIN_SCAN_INTERVAL_MINUTES,
 )
-from .coordinator import KsefConfigEntry
+from .coordinator import (
+    KsefConfigEntry,
+    configured_notify_services,
+    normalize_notify_services,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,14 +77,61 @@ def _env_selector() -> SelectSelector:
     )
 
 
-STEP_USER_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_NIP): str,
-        vol.Required(CONF_KSEF_TOKEN): _token_schema(),
-        vol.Required(CONF_ENVIRONMENT, default=ENV_PROD): _env_selector(),
-        vol.Optional(CONF_NOTIFY_SERVICE, default=DEFAULT_NOTIFY_SERVICE): str,
+# Usługi domeny notify, których nie da się wywołać samym tytułem i treścią.
+NOTIFY_SKIP = {"send_message"}
+
+
+def _notify_selector(hass: HomeAssistant, current: list[str]) -> SelectSelector:
+    """Lista rozwijana usług notify dostępnych w tej chwili w HA.
+
+    Telefony z aplikacją mobilną dostają czytelną etykietę z nazwą urządzenia
+    ("Fold7 · notify.mobile_app_fold7"). Wybór wielokrotny pozwala wysyłać
+    push na kilka telefonów, a custom_value - wpisać usługę ręcznie, gdy
+    integracja powiadomień jeszcze się nie załadowała.
+    """
+    phones = {
+        f"mobile_app_{slugify(name)}": name
+        for entry in hass.config_entries.async_entries("mobile_app")
+        if (name := entry.data.get("device_name"))
     }
-)
+    services = {
+        f"notify.{name}"
+        for name in hass.services.async_services_for_domain("notify")
+        if name not in NOTIFY_SKIP
+    }
+    services.update(current)
+
+    def _label(service: str) -> str:
+        name = service.removeprefix("notify.")
+        if name in phones:
+            return f"{phones[name]} · {service}"
+        return service
+
+    # Najpierw telefony, potem reszta (grupy, persistent_notification itp.).
+    ordered = sorted(
+        services,
+        key=lambda s: (s.removeprefix("notify.") not in phones, _label(s).lower()),
+    )
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[SelectOptionDict(value=s, label=_label(s)) for s in ordered],
+            multiple=True,
+            custom_value=True,
+            mode=SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _user_schema(hass: HomeAssistant) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(CONF_NIP): str,
+            vol.Required(CONF_KSEF_TOKEN): _token_schema(),
+            vol.Required(CONF_ENVIRONMENT, default=ENV_PROD): _env_selector(),
+            vol.Optional(CONF_NOTIFY_SERVICE): _notify_selector(hass, []),
+        }
+    )
+
 
 
 async def _validate(hass, environment: str, nip: str, token: str) -> str | None:
@@ -131,9 +183,9 @@ class KsefConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_ENVIRONMENT: environment,
                         },
                         options={
-                            CONF_NOTIFY_SERVICE: user_input.get(
-                                CONF_NOTIFY_SERVICE, DEFAULT_NOTIFY_SERVICE
-                            ).strip(),
+                            CONF_NOTIFY_SERVICE: normalize_notify_services(
+                                user_input.get(CONF_NOTIFY_SERVICE)
+                            ),
                             CONF_NOTIFY_SALES: False,
                             CONF_SCAN_INTERVAL_MINUTES: DEFAULT_SCAN_INTERVAL_MINUTES,
                         },
@@ -142,7 +194,7 @@ class KsefConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="user",
             data_schema=self.add_suggested_values_to_schema(
-                STEP_USER_SCHEMA, user_input or {}
+                _user_schema(self.hass), user_input or {}
             ),
             errors=errors,
         )
@@ -191,19 +243,20 @@ class KsefOptionsFlow(OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(
                 data={
-                    CONF_NOTIFY_SERVICE: (user_input.get(CONF_NOTIFY_SERVICE) or "").strip(),
+                    CONF_NOTIFY_SERVICE: normalize_notify_services(user_input.get(CONF_NOTIFY_SERVICE)),
                     CONF_NOTIFY_SALES: bool(user_input.get(CONF_NOTIFY_SALES)),
                     CONF_SCAN_INTERVAL_MINUTES: int(user_input[CONF_SCAN_INTERVAL_MINUTES]),
                 }
             )
 
         options = self.config_entry.options
+        current = configured_notify_services(self.config_entry)
+        # Bez default=: przy wyczyszczonym polu formularz w ogóle nie wysyła
+        # klucza i voluptuous podstawiłby z powrotem stare usługi. Bieżący
+        # wybór podajemy jako sugerowaną wartość (niżej).
         schema = vol.Schema(
             {
-                vol.Optional(
-                    CONF_NOTIFY_SERVICE,
-                    default=options.get(CONF_NOTIFY_SERVICE, DEFAULT_NOTIFY_SERVICE),
-                ): str,
+                vol.Optional(CONF_NOTIFY_SERVICE): _notify_selector(self.hass, current),
                 vol.Required(
                     CONF_NOTIFY_SALES, default=options.get(CONF_NOTIFY_SALES, False)
                 ): BooleanSelector(),
@@ -222,4 +275,9 @@ class KsefOptionsFlow(OptionsFlow):
                 ),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, {CONF_NOTIFY_SERVICE: current}
+            ),
+        )

@@ -3,12 +3,12 @@
     "step": {
       "user": {
         "title": "KSeF - connection",
-        "description": "Enter your NIP and a KSeF token generated in the KSeF Taxpayer Application (Tokens → Generate token, permission \"invoice viewing\").",
+        "description": "Enter your NIP and a KSeF token generated in the KSeF Taxpayer Application (Tokens → Generate token, permission \"invoice viewing\"). Notifications: pick phones running the Home Assistant app or other notify services; empty = no push.",
         "data": {
           "nip": "NIP",
           "ksef_token": "KSeF token",
           "environment": "Environment",
-          "notify_service": "Notify service (e.g. notify.mobile_app_telefon)"
+          "notify_service": "Push notifications (pick one or more phones)"
         }
       },
       "reauth_confirm": {
@@ -35,7 +35,7 @@
       "init": {
         "title": "KSeF options",
         "data": {
-          "notify_service": "Notify service (empty = no push)",
+          "notify_service": "Push notifications (empty = no push)",
           "notify_sales": "Also notify about issued invoices",
           "scan_interval_minutes": "Polling interval (minutes, min. 15)"
         }

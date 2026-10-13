@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import voluptuous as vol
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
@@ -67,6 +69,37 @@ def _window(now: datetime) -> tuple[datetime, list[str]]:
 def month_label(key: str) -> str:
     year, month = key.split("-")
     return f"{MONTH_NAMES[int(month) - 1]} {year}"
+
+
+def configured_notify_services(entry: ConfigEntry) -> list[str]:
+    """Usługi powiadomień z opcji wpisu jako lista.
+
+    Do wersji 0.1.0 opcja była pojedynczym tekstem (np. "notify.mobile_app_fold7"),
+    od 0.1.1 jest listą z wyboru wielokrotnego. Czytamy oba kształty, więc
+    istniejące instalacje działają bez migracji i bez ponownej konfiguracji.
+    """
+    return normalize_notify_services(
+        entry.options.get(
+            CONF_NOTIFY_SERVICE,
+            entry.data.get(CONF_NOTIFY_SERVICE, DEFAULT_NOTIFY_SERVICE),
+        )
+    )
+
+
+def normalize_notify_services(value: Any) -> list[str]:
+    """Tekst albo lista -> lista pełnych nazw "notify.xxx" bez pustych i duplikatów."""
+    if isinstance(value, str):
+        value = [value]
+    services: list[str] = []
+    for item in value or []:
+        item = str(item).strip()
+        if not item:
+            continue
+        if "." not in item:
+            item = f"notify.{item}"
+        if item not in services:
+            services.append(item)
+    return services
 
 
 def _amount(value: Any) -> float | None:
@@ -272,18 +305,15 @@ class KsefCoordinator(DataUpdateCoordinator[dict[str, list[dict[str, Any]]]]):
             inv for inv in new
             if inv["kind"] == KIND_PURCHASE or notify_sales
         ]
-        service = self.config_entry.options.get(
-            CONF_NOTIFY_SERVICE,
-            self.config_entry.data.get(CONF_NOTIFY_SERVICE, DEFAULT_NOTIFY_SERVICE),
-        )
-        if not to_push or not service:
+        services = configured_notify_services(self.config_entry)
+        if not to_push or not services:
             return
 
         if len(to_push) > NOTIFY_BATCH_LIMIT:
             total = sum(inv.get("gross_amount") or 0 for inv in to_push)
             title = f"KSeF: {len(to_push)} nowe faktury"
             message = f"Łącznie {_fmt_money(total)} zł brutto. Szczegóły w panelu KSeF."
-            await self._push(service, title, message, "ksef-batch")
+            await self._push(services, title, message, "ksef-batch")
             return
 
         for inv in to_push:
@@ -295,31 +325,37 @@ class KsefCoordinator(DataUpdateCoordinator[dict[str, list[dict[str, Any]]]]):
                 f"{party}: {amount} {'zł' if currency == 'PLN' else currency} brutto\n"
                 f"{inv.get('invoice_number')} z {_fmt_date(inv.get('issue_date'))}"
             )
-            await self._push(service, f"KSeF: {label}", message, inv["ksef_number"])
+            await self._push(services, f"KSeF: {label}", message, inv["ksef_number"])
 
-    async def _push(self, service: str, title: str, message: str, tag: str) -> None:
-        domain, _, name = service.partition(".")
-        if not name:
-            domain, name = "notify", service
-        try:
-            await self.hass.services.async_call(
-                domain,
-                name,
-                {
-                    "title": title,
-                    "message": message,
-                    # clickAction (Android) / url (iOS) - tapnięcie otwiera panel.
-                    "data": {
-                        "clickAction": f"/{PANEL_URL_PATH}",
-                        "url": f"/{PANEL_URL_PATH}",
-                        "tag": tag,
-                        "group": "ksef",
+    async def _push(
+        self, services: list[str], title: str, message: str, tag: str
+    ) -> None:
+        for service in services:
+            domain, _, name = service.partition(".")
+            if not name:
+                domain, name = "notify", service
+            try:
+                await self.hass.services.async_call(
+                    domain,
+                    name,
+                    {
+                        "title": title,
+                        "message": message,
+                        # clickAction (Android) / url (iOS) - tapnięcie otwiera panel.
+                        "data": {
+                            "clickAction": f"/{PANEL_URL_PATH}",
+                            "url": f"/{PANEL_URL_PATH}",
+                            "tag": tag,
+                            "group": "ksef",
+                        },
                     },
-                },
-                blocking=True,
-            )
-        except (HomeAssistantError, ValueError) as err:
-            _LOGGER.warning("Nie udało się wysłać powiadomienia przez %s: %s", service, err)
+                    blocking=True,
+                )
+            except (HomeAssistantError, vol.Invalid, ValueError) as err:
+                # Jeden zepsuty telefon nie może zablokować pushy na pozostałe.
+                _LOGGER.warning(
+                    "Nie udało się wysłać powiadomienia przez %s: %s", service, err
+                )
 
     # --------------------------------------------------------------- XML
 

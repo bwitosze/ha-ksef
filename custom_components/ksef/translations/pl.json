@@ -3,12 +3,12 @@
     "step": {
       "user": {
         "title": "KSeF - połączenie",
-        "description": "Podaj NIP i token KSeF wygenerowany w Aplikacji Podatnika KSeF (Tokeny → Generuj token, uprawnienie „przeglądanie faktur”). Token jest pokazywany tylko raz.",
+        "description": "Podaj NIP i token KSeF wygenerowany w Aplikacji Podatnika KSeF (Tokeny → Generuj token, uprawnienie „przeglądanie faktur”). Token jest pokazywany tylko raz. Powiadomienia: wybierz z listy telefony z aplikacją Home Assistanta albo inne usługi notify; puste = bez pushy.",
         "data": {
           "nip": "NIP",
           "ksef_token": "Token KSeF",
           "environment": "Środowisko",
-          "notify_service": "Usługa powiadomień (np. notify.mobile_app_telefon)"
+          "notify_service": "Powiadomienia push (możesz wybrać kilka telefonów)"
         }
       },
       "reauth_confirm": {
@@ -35,7 +35,7 @@
       "init": {
         "title": "Opcje KSeF",
         "data": {
-          "notify_service": "Usługa powiadomień (puste = bez pushy)",
+          "notify_service": "Powiadomienia push (puste = bez pushy)",
           "notify_sales": "Powiadamiaj także o wystawionych fakturach",
           "scan_interval_minutes": "Częstotliwość odpytywania (minuty, min. 15)"
         }

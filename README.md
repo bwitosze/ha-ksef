@@ -56,10 +56,12 @@ Ustawienia → Urządzenia i usługi → **Dodaj integrację** → *KSeF*:
 - **NIP** i **token KSeF**.
 - **Środowisko**: Produkcja, Demo albo Testowe. Token działa tylko w środowisku,
   w którym został wygenerowany.
-- **Usługa powiadomień**, np. `notify.mobile_app_telefon`. Puste pole oznacza brak pushy.
+- **Powiadomienia push**: lista rozwijana z telefonami, na których działa aplikacja
+  Home Assistanta (z nazwą urządzenia), i innymi usługami `notify`. Możesz wybrać
+  kilka telefonów albo wpisać usługę ręcznie. Puste pole oznacza brak pushy.
 
 Formularz od razu próbnie loguje się do KSeF, więc zły token widać od razu.
-W **Opcjach** zmienisz usługę powiadomień, włączysz pushe o fakturach sprzedażowych
+W **Opcjach** zmienisz telefony do powiadomień, włączysz pushe o fakturach sprzedażowych
 i ustawisz częstotliwość odpytywania.
 
 ## Limity KSeF
