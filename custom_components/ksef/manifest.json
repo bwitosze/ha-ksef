@@ -1,0 +1,20 @@
+{
+  "domain": "ksef",
+  "name": "KSeF - Krajowy System e-Faktur",
+  "codeowners": [
+    "@bwitosze"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "frontend",
+    "panel_custom",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/bwitosze/ha-ksef",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/bwitosze/ha-ksef/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

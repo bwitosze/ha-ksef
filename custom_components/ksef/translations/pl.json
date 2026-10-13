@@ -1,0 +1,70 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "KSeF - połączenie",
+        "description": "Podaj NIP i token KSeF wygenerowany w Aplikacji Podatnika KSeF (Tokeny → Generuj token, uprawnienie „przeglądanie faktur”). Token jest pokazywany tylko raz.",
+        "data": {
+          "nip": "NIP",
+          "ksef_token": "Token KSeF",
+          "environment": "Środowisko",
+          "notify_service": "Usługa powiadomień (np. notify.mobile_app_telefon)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "KSeF - nowy token",
+        "description": "KSeF odrzucił token dla NIP {nip} (unieważniony albo usunięty). Wygeneruj nowy w Aplikacji Podatnika KSeF i wklej go tutaj.",
+        "data": {
+          "ksef_token": "Token KSeF"
+        }
+      }
+    },
+    "error": {
+      "invalid_nip": "Niepoprawny NIP (zła suma kontrolna).",
+      "invalid_auth": "KSeF odrzucił token. Sprawdź, czy jest skopiowany w całości, aktywny i wygenerowany dla tego NIP-u i tego środowiska.",
+      "cannot_connect": "Brak połączenia z KSeF. Spróbuj ponownie za chwilę.",
+      "unknown": "Nieoczekiwany błąd - szczegóły w logu."
+    },
+    "abort": {
+      "already_configured": "Ten NIP jest już skonfigurowany w tym środowisku.",
+      "reauth_successful": "Nowy token zapisany."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje KSeF",
+        "data": {
+          "notify_service": "Usługa powiadomień (puste = bez pushy)",
+          "notify_sales": "Powiadamiaj także o wystawionych fakturach",
+          "scan_interval_minutes": "Częstotliwość odpytywania (minuty, min. 15)"
+        }
+      }
+    }
+  },
+  "selector": {
+    "environment": {
+      "options": {
+        "prod": "Produkcja",
+        "demo": "Demo (przedprodukcja)",
+        "test": "Testowe"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "purchase_current_month": {
+        "name": "Faktury zakupowe w tym miesiącu"
+      },
+      "sales_current_month": {
+        "name": "Faktury sprzedażowe w tym miesiącu"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Odśwież faktury",
+      "description": "Pobiera listę faktur z KSeF (nie częściej niż co 2 minuty)."
+    }
+  }
+}

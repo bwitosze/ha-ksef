@@ -1,0 +1,70 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "KSeF - connection",
+        "description": "Enter your NIP and a KSeF token generated in the KSeF Taxpayer Application (Tokens → Generate token, permission \"invoice viewing\").",
+        "data": {
+          "nip": "NIP",
+          "ksef_token": "KSeF token",
+          "environment": "Environment",
+          "notify_service": "Notify service (e.g. notify.mobile_app_telefon)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "KSeF - new token",
+        "description": "KSeF rejected the token for NIP {nip}. Generate a new one and paste it here.",
+        "data": {
+          "ksef_token": "KSeF token"
+        }
+      }
+    },
+    "error": {
+      "invalid_nip": "Invalid NIP (checksum).",
+      "invalid_auth": "KSeF rejected the token.",
+      "cannot_connect": "Cannot connect to KSeF.",
+      "unknown": "Unexpected error - see the log."
+    },
+    "abort": {
+      "already_configured": "This NIP is already configured for this environment.",
+      "reauth_successful": "New token saved."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "KSeF options",
+        "data": {
+          "notify_service": "Notify service (empty = no push)",
+          "notify_sales": "Also notify about issued invoices",
+          "scan_interval_minutes": "Polling interval (minutes, min. 15)"
+        }
+      }
+    }
+  },
+  "selector": {
+    "environment": {
+      "options": {
+        "prod": "Production",
+        "demo": "Demo (pre-production)",
+        "test": "Test"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "purchase_current_month": {
+        "name": "Purchase invoices this month"
+      },
+      "sales_current_month": {
+        "name": "Sales invoices this month"
+      }
+    }
+  },
+  "services": {
+    "refresh": {
+      "name": "Refresh invoices",
+      "description": "Fetch the invoice list from KSeF (at most every 2 minutes)."
+    }
+  }
+}
