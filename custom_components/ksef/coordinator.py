@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import os
+import tempfile
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -13,9 +16,10 @@ from zoneinfo import ZoneInfo
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -40,6 +44,8 @@ from .const import (
     MONTH_NAMES,
     NOTIFY_BATCH_LIMIT,
     PANEL_URL_PATH,
+    PENDING_MAX_AGE,
+    PUSH_RETRY_SECONDS,
     QR_BASE_URLS,
     SUBJECT_TYPES,
 )
@@ -188,7 +194,14 @@ class KsefCoordinator(DataUpdateCoordinator[dict[str, list[dict[str, Any]]]]):
         self._seeded = False
         self.last_update: str | None = None
         self.last_error: str | None = None
+        # Pushe czekające na doręczenie: numer KSeF -> usługi notify, które
+        # jeszcze go nie przyjęły. Utrwalane, żeby restart HA ich nie zgubił.
+        self._pending: dict[str, dict[str, Any]] = {}
+        self._deliver_lock = asyncio.Lock()
+        self._retry_unsub: CALLBACK_TYPE | None = None
         self._blocked_until = 0.0
+        self._xml_blocked_until = 0.0
+        self._xml_locks: dict[str, asyncio.Lock] = {}
         self._last_query = 0.0
         self.xml_dir = Path(hass.config.path(".storage", "ksef_xml", entry.entry_id))
 
@@ -199,8 +212,13 @@ class KsefCoordinator(DataUpdateCoordinator[dict[str, list[dict[str, Any]]]]):
         self._invoices = stored.get("invoices") or {}
         self._known = set(stored.get("known") or [])
         self._seeded = bool(stored.get("seeded"))
+        self._pending = stored.get("pending") or {}
         self.last_update = stored.get("last_update")
         self.async_set_updated_data(self._snapshot())
+        if self._pending:
+            # Pushe niedoręczone przed restartem - usługi notify ładują się
+            # chwilę po starcie, więc próbujemy dopiero po odczekaniu.
+            self._schedule_retry()
 
     async def _async_save(self) -> None:
         await self._store.async_save(
@@ -208,9 +226,16 @@ class KsefCoordinator(DataUpdateCoordinator[dict[str, list[dict[str, Any]]]]):
                 "invoices": self._invoices,
                 "known": sorted(self._known),
                 "seeded": self._seeded,
+                "pending": self._pending,
                 "last_update": self.last_update,
             }
         )
+
+    @callback
+    def async_shutdown_retry(self) -> None:
+        if self._retry_unsub:
+            self._retry_unsub()
+            self._retry_unsub = None
 
     def _snapshot(self) -> dict[str, list[dict[str, Any]]]:
         result: dict[str, list[dict[str, Any]]] = {KIND_PURCHASE: [], KIND_SALES: []}
@@ -228,11 +253,20 @@ class KsefCoordinator(DataUpdateCoordinator[dict[str, list[dict[str, Any]]]]):
         return _window(dt_util.now(TZ))[1]
 
     def month_total(self, kind: str, month: str) -> tuple[int, float]:
+        """Liczba wszystkich faktur z miesiąca i suma brutto samych PLN.
+
+        Faktury walutowe liczą się do liczby, ale nie do sumy - bez kursu
+        nie da się ich uczciwie dodać do złotówek.
+        """
         items = [
-            inv for inv in (self.data or {}).get(kind, [])
-            if inv["month"] == month and inv.get("currency") == "PLN"
+            inv for inv in (self.data or {}).get(kind, []) if inv["month"] == month
         ]
-        return len(items), round(sum(inv.get("gross_amount") or 0 for inv in items), 2)
+        gross_pln = sum(
+            inv.get("gross_amount") or 0
+            for inv in items
+            if (inv.get("currency") or "PLN") == "PLN"
+        )
+        return len(items), round(gross_pln, 2)
 
     # ------------------------------------------------------- odświeżanie
 
@@ -282,80 +316,147 @@ class KsefCoordinator(DataUpdateCoordinator[dict[str, list[dict[str, Any]]]]):
         self._seeded = True
         self.last_update = dt_util.utcnow().isoformat()
         self.last_error = None
-        await self._async_save()
-        self._prune_xml_cache()
 
         if new and not first_run:
             # Pierwsza synchronizacja zna wszystkie faktury z dwóch miesięcy -
             # push o każdej z nich byłby spamem, więc tylko je zapamiętujemy.
-            await self._announce(new)
+            self._queue(new)
+        # Kolejkę zapisujemy RAZEM ze zbiorem znanych faktur, zanim cokolwiek
+        # wyślemy - restart w trakcie wysyłki nie zgubi pusha.
+        await self._async_save()
+        self._prune_xml_cache()
+        await self._async_deliver()
         self.hass.bus.async_fire(EVENT_UPDATED, {"entry_id": self.config_entry.entry_id})
         return self._snapshot()
 
     # ----------------------------------------------------- powiadomienia
 
-    async def _announce(self, new: list[dict[str, Any]]) -> None:
+    def _queue(self, new: list[dict[str, Any]]) -> None:
+        """Zdarzenie dla automatyzacji od razu, pushe do kolejki doręczeń."""
         for invoice in new:
             self.hass.bus.async_fire(
                 EVENT_NEW_INVOICE, {"entry_id": self.config_entry.entry_id, **invoice}
             )
-
-        notify_sales = self.config_entry.options.get(CONF_NOTIFY_SALES, False)
-        to_push = [
-            inv for inv in new
-            if inv["kind"] == KIND_PURCHASE or notify_sales
-        ]
         services = configured_notify_services(self.config_entry)
-        if not to_push or not services:
+        if not services:
             return
+        notify_sales = self.config_entry.options.get(CONF_NOTIFY_SALES, False)
+        now = dt_util.utcnow().isoformat()
+        for invoice in new:
+            if invoice["kind"] == KIND_PURCHASE or notify_sales:
+                self._pending[invoice["ksef_number"]] = {
+                    "services": list(services),
+                    "since": now,
+                }
 
-        if len(to_push) > NOTIFY_BATCH_LIMIT:
-            total = sum(inv.get("gross_amount") or 0 for inv in to_push)
-            title = f"KSeF: {len(to_push)} nowe faktury"
-            message = f"Łącznie {_fmt_money(total)} zł brutto. Szczegóły w panelu KSeF."
-            await self._push(services, title, message, "ksef-batch")
-            return
-
-        for inv in to_push:
-            label = "Nowa faktura" if inv["kind"] == KIND_PURCHASE else "Wystawiona faktura"
-            party = inv.get("counterparty_name") or inv.get("counterparty_nip") or "?"
-            amount = _fmt_money(inv.get("gross_amount"))
-            currency = inv.get("currency") or "PLN"
-            message = (
-                f"{party}: {amount} {'zł' if currency == 'PLN' else currency} brutto\n"
-                f"{inv.get('invoice_number')} z {_fmt_date(inv.get('issue_date'))}"
-            )
-            await self._push(services, f"KSeF: {label}", message, inv["ksef_number"])
-
-    async def _push(
-        self, services: list[str], title: str, message: str, tag: str
-    ) -> None:
-        for service in services:
-            domain, _, name = service.partition(".")
-            if not name:
-                domain, name = "notify", service
-            try:
-                await self.hass.services.async_call(
-                    domain,
-                    name,
-                    {
-                        "title": title,
-                        "message": message,
-                        # clickAction (Android) / url (iOS) - tapnięcie otwiera panel.
-                        "data": {
-                            "clickAction": f"/{PANEL_URL_PATH}",
-                            "url": f"/{PANEL_URL_PATH}",
-                            "tag": tag,
-                            "group": "ksef",
-                        },
-                    },
-                    blocking=True,
-                )
-            except (HomeAssistantError, vol.Invalid, ValueError) as err:
-                # Jeden zepsuty telefon nie może zablokować pushy na pozostałe.
+    def _prune_pending(self) -> None:
+        """Odrzuć pushe przeterminowane, spoza okna i do usuniętych usług."""
+        configured = set(configured_notify_services(self.config_entry))
+        cutoff = dt_util.utcnow() - PENDING_MAX_AGE
+        for number in list(self._pending):
+            item = self._pending[number]
+            item["services"] = [s for s in item["services"] if s in configured]
+            since = dt_util.parse_datetime(item.get("since") or "")
+            expired = since is None or since < cutoff
+            if expired and item["services"]:
                 _LOGGER.warning(
-                    "Nie udało się wysłać powiadomienia przez %s: %s", service, err
+                    "Rezygnuję z pusha o fakturze %s - %s nie przyjęły go przez %s",
+                    number,
+                    ", ".join(item["services"]),
+                    PENDING_MAX_AGE,
                 )
+            if expired or not item["services"] or number not in self._invoices:
+                del self._pending[number]
+
+    async def _async_deliver(self) -> None:
+        """Wyślij zaległe pushe. Nieudane zostają w kolejce na kolejną próbę."""
+        # Ponowienie z timera i zwykłe odświeżenie mogą się zejść w czasie -
+        # bez blokady ten sam push poszedłby dwa razy.
+        async with self._deliver_lock:
+            await self._async_deliver_locked()
+
+    async def _async_deliver_locked(self) -> None:
+        self._prune_pending()
+        if not self._pending:
+            return
+        by_service: dict[str, list[str]] = {}
+        for number, item in self._pending.items():
+            for service in item["services"]:
+                by_service.setdefault(service, []).append(number)
+
+        failed = False
+        for service, numbers in by_service.items():
+            invoices = [self._invoices[n] for n in numbers]
+            if len(invoices) > NOTIFY_BATCH_LIMIT:
+                messages = [_batch_message(invoices)]
+            else:
+                messages = [_single_message(inv) for inv in invoices]
+            delivered = True
+            for title, message, tag in messages:
+                if not await self._push(service, title, message, tag):
+                    delivered = False
+                    break
+            if not delivered:
+                failed = True
+                continue
+            # Przy paczce indywidualnych pushy przerwanie w połowie zostawia
+            # całą listę - lepiej powtórzyć jeden push, niż jakiś zgubić.
+            for number in numbers:
+                item = self._pending.get(number)
+                if item and service in item["services"]:
+                    item["services"].remove(service)
+                    if not item["services"]:
+                        del self._pending[number]
+
+        await self._async_save()
+        if failed:
+            self._schedule_retry()
+
+    def _schedule_retry(self) -> None:
+        """Kolejna próba doręczenia bez odpytywania KSeF."""
+        if self._retry_unsub:
+            return
+
+        @callback
+        def _retry(_now: datetime) -> None:
+            self._retry_unsub = None
+            self.config_entry.async_create_background_task(
+                self.hass, self._async_deliver(), f"{DOMAIN} push retry"
+            )
+
+        self._retry_unsub = async_call_later(self.hass, PUSH_RETRY_SECONDS, _retry)
+
+    async def _push(self, service: str, title: str, message: str, tag: str) -> bool:
+        domain, _, name = service.partition(".")
+        if not name:
+            domain, name = "notify", service
+        try:
+            await self.hass.services.async_call(
+                domain,
+                name,
+                {
+                    "title": title,
+                    "message": message,
+                    # clickAction (Android) / url (iOS) - tapnięcie otwiera panel.
+                    "data": {
+                        "clickAction": f"/{PANEL_URL_PATH}",
+                        "url": f"/{PANEL_URL_PATH}",
+                        "tag": tag,
+                        "group": "ksef",
+                    },
+                },
+                blocking=True,
+            )
+        except (HomeAssistantError, vol.Invalid, ValueError) as err:
+            # Np. usługa telefonu jeszcze niezarejestrowana tuż po restarcie.
+            _LOGGER.warning(
+                "Push przez %s nieudany, ponowię za %s s: %s",
+                service,
+                PUSH_RETRY_SECONDS,
+                err,
+            )
+            return False
+        return True
 
     # --------------------------------------------------------------- XML
 
@@ -369,22 +470,36 @@ class KsefCoordinator(DataUpdateCoordinator[dict[str, list[dict[str, Any]]]]):
         więc każdy plik ściągamy dokładnie raz.
         """
         path = self.xml_dir / f"{ksef_number}.xml"
-        cached = await self.hass.async_add_executor_job(_read_file, path)
-        if cached is not None:
-            return cached
-        try:
-            content = await self.api.download_invoice(ksef_number)
-        except KsefNotFoundError as err:
-            raise HomeAssistantError(
-                "Faktura jeszcze nie jest dostępna w KSeF - spróbuj za kilka minut."
-            ) from err
-        except KsefError as err:
-            raise HomeAssistantError(str(err)) from err
-        await self.hass.async_add_executor_job(_write_file, path, content)
-        return content
+        # Jedno pobranie na fakturę naraz: XML i PDF klikniete jednocześnie
+        # (albo dwa telefony) czekają na pierwszy wynik zamiast pytać KSeF dwa razy.
+        lock = self._xml_locks.setdefault(ksef_number, asyncio.Lock())
+        async with lock:
+            cached = await self.hass.async_add_executor_job(_read_file, path)
+            if cached is not None:
+                return cached
+            wait = self._xml_blocked_until - time.time()
+            if wait > 0:
+                raise XmlRateLimited(int(wait) + 1)
+            try:
+                content = await self.api.download_invoice(ksef_number)
+            except KsefRateLimitError as err:
+                self._xml_blocked_until = time.time() + err.retry_after
+                raise XmlRateLimited(err.retry_after) from err
+            except KsefNotFoundError as err:
+                raise HomeAssistantError(
+                    "Faktura jeszcze nie jest dostępna w KSeF - spróbuj za kilka minut."
+                ) from err
+            except KsefError as err:
+                raise HomeAssistantError(str(err)) from err
+            await self.hass.async_add_executor_job(_write_file, path, content)
+            return content
 
     def _prune_xml_cache(self) -> None:
         keep = set(self._invoices)
+
+        for number in [n for n in self._xml_locks if n not in keep]:
+            if not self._xml_locks[number].locked():
+                del self._xml_locks[number]
 
         def _prune() -> None:
             if not self.xml_dir.is_dir():
@@ -416,9 +531,56 @@ def _read_file(path: Path) -> bytes | None:
 
 def _write_file(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(content)
-    tmp.replace(path)
+    # Unikalny plik tymczasowy - dwa zapisy nie mogą sobie podmienić .tmp.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+class XmlRateLimited(HomeAssistantError):
+    """KSeF zablokował pobieranie XML - widok HTTP odda 429 z Retry-After."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(
+            f"KSeF chwilowo blokuje pobieranie faktur (limit 64 na godzinę). "
+            f"Spróbuj za {max(1, retry_after // 60)} min."
+        )
+        self.retry_after = retry_after
+
+
+def _currency_label(currency: str | None) -> str:
+    return "zł" if (currency or "PLN") == "PLN" else str(currency)
+
+
+def _single_message(inv: dict[str, Any]) -> tuple[str, str, str]:
+    label = "Nowa faktura" if inv["kind"] == KIND_PURCHASE else "Wystawiona faktura"
+    party = inv.get("counterparty_name") or inv.get("counterparty_nip") or "?"
+    message = (
+        f"{party}: {_fmt_money(inv.get('gross_amount'))} "
+        f"{_currency_label(inv.get('currency'))} brutto\n"
+        f"{inv.get('invoice_number')} z {_fmt_date(inv.get('issue_date'))}"
+    )
+    return f"KSeF: {label}", message, inv["ksef_number"]
+
+
+def _batch_message(invoices: list[dict[str, Any]]) -> tuple[str, str, str]:
+    """Jeden push zamiast wielu - sumy osobno dla każdej waluty."""
+    totals: dict[str, float] = {}
+    for inv in invoices:
+        currency = inv.get("currency") or "PLN"
+        totals[currency] = totals.get(currency, 0) + (inv.get("gross_amount") or 0)
+    order = sorted(totals, key=lambda c: (c != "PLN", c))
+    sums = "; ".join(f"{_fmt_money(totals[c])} {_currency_label(c)}" for c in order)
+    return (
+        f"KSeF: {len(invoices)} nowe faktury",
+        f"Łącznie brutto: {sums}. Szczegóły w panelu KSeF.",
+        "ksef-batch",
+    )
 
 
 def _fmt_money(value: Any) -> str:

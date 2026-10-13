@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import Final
 
 DOMAIN: Final = "ksef"
@@ -61,6 +62,11 @@ STATIC_URL: Final = "/ksef_static"
 
 # Powyżej tylu nowych faktur naraz wysyłamy jedno zbiorcze powiadomienie.
 NOTIFY_BATCH_LIMIT: Final = 3
+
+# Nieudany push (np. usługa telefonu jeszcze niezarejestrowana po restarcie)
+# ponawiamy co tyle sekund, bez odpytywania KSeF, ale nie dłużej niż dobę.
+PUSH_RETRY_SECONDS: Final = 60
+PENDING_MAX_AGE: Final = timedelta(hours=24)
 
 MONTH_NAMES: Final = (
     "Styczeń", "Luty", "Marzec", "Kwiecień", "Maj", "Czerwiec",

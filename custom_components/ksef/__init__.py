@@ -25,15 +25,14 @@ from aiohttp import web
 from homeassistant.components import frontend, panel_custom, websocket_api
 from homeassistant.components.http import KEY_HASS, HomeAssistantView, StaticPathConfig
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers import config_validation as cv
 
 from .const import (
-    CONF_ENVIRONMENT,
     DOMAIN,
-    ENV_PROD,
+    EVENT_UPDATED,
     KIND_PURCHASE,
     KIND_SALES,
     PANEL_URL_PATH,
@@ -41,7 +40,7 @@ from .const import (
     SERVICE_REFRESH,
     STATIC_URL,
 )
-from .coordinator import KsefConfigEntry, KsefCoordinator, month_label
+from .coordinator import KsefConfigEntry, KsefCoordinator, XmlRateLimited, month_label
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +62,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_view(KsefInvoiceXmlView())
     websocket_api.async_register_command(hass, ws_invoices)
     websocket_api.async_register_command(hass, ws_refresh)
+    websocket_api.async_register_command(hass, ws_subscribe)
     _async_register_services(hass)
     return True
 
@@ -72,6 +72,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: KsefConfigEntry) -> bool
     coordinator = KsefCoordinator(hass, entry)
     await coordinator.async_load()
     entry.runtime_data = coordinator
+    entry.async_on_unload(coordinator.async_shutdown_retry)
+    # DataUpdateCoordinator planuje kolejne odświeżenia tylko, gdy ma
+    # słuchaczy. Bez własnego słuchacza wyłączenie obu sensorów zatrzymałoby
+    # odpytywanie KSeF, a z nim pushe i aktualizację panelu.
+    entry.async_on_unload(coordinator.async_add_listener(lambda: None))
     # Pierwsze odświeżenie w tle: po restarcie HA panel ma dane z cache,
     # a chwilowy brak KSeF nie blokuje startu integracji.
     entry.async_create_background_task(
@@ -165,10 +170,17 @@ def ws_invoices(
     months: list[str] = []
     errors: list[str] = []
     last_updates: list[str] = []
+    environments: set[str] = set()
     for coordinator in coordinators:
         entry_id = coordinator.config_entry.entry_id
+        environments.add(coordinator.environment)
+        # Środowisko przy każdej fakturze: przy wpisie produkcyjnym i testowym
+        # naraz panel oznacza faktury testowe i nie wlicza ich do sum.
         for kind, items in (coordinator.data or {}).items():
-            invoices[kind].extend({**inv, "entry_id": entry_id} for inv in items)
+            invoices[kind].extend(
+                {**inv, "entry_id": entry_id, "environment": coordinator.environment}
+                for inv in items
+            )
         months = coordinator.months
         if coordinator.last_error:
             errors.append(coordinator.last_error)
@@ -190,12 +202,36 @@ def ws_invoices(
             "invoices": invoices,
             "last_update": min(last_updates) if last_updates else None,
             "last_error": " | ".join(errors) or None,
-            "environment": (
-                coordinators[0].config_entry.data.get(CONF_ENVIRONMENT, ENV_PROD)
-                if coordinators else None
-            ),
+            # Pojedyncze środowisko tylko, gdy wszystkie wpisy są z jednego.
+            "environment": environments.pop() if len(environments) == 1 else None,
+            "mixed_environments": len(environments) > 1,
         },
     )
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ksef/subscribe"})
+@callback
+def ws_subscribe(
+    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]
+) -> None:
+    """Powiadamiaj panel o każdym odświeżeniu.
+
+    Zwykłe ``subscribe_events`` na ``ksef_updated`` HA odrzuca dla kont bez
+    uprawnień administratora (zdarzenie spoza listy dozwolonych), a panel
+    jest dostępny dla wszystkich zalogowanych. Własna komenda wysyła tylko
+    identyfikator wpisu - dane panel i tak pobiera przez ``ksef/invoices``.
+    """
+
+    @callback
+    def _forward(event: Event) -> None:
+        connection.send_message(
+            websocket_api.event_message(
+                msg["id"], {"entry_id": event.data.get("entry_id")}
+            )
+        )
+
+    connection.subscriptions[msg["id"]] = hass.bus.async_listen(EVENT_UPDATED, _forward)
+    connection.send_result(msg["id"])
 
 
 @websocket_api.websocket_command({vol.Required("type"): "ksef/refresh"})
@@ -235,6 +271,12 @@ class KsefInvoiceXmlView(HomeAssistantView):
             return web.Response(status=404, text="Brak faktury na liście")
         try:
             content = await coordinator.async_get_xml(ksef_number)
+        except XmlRateLimited as err:
+            return web.Response(
+                status=429,
+                text=str(err),
+                headers={"Retry-After": str(err.retry_after)},
+            )
         except HomeAssistantError as err:
             return web.Response(status=502, text=str(err))
         return web.Response(

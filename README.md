@@ -50,6 +50,9 @@ go odrzuci, Home Assistant poprosi o nowy.
   poprzedni/bieżący miesiąc, kwoty netto i brutto, sumy, ręczne odświeżanie.
 - **Pobieranie PDF i XML** każdej faktury. PDF generuje w przeglądarce oficjalny
   generator wizualizacji Ministerstwa Finansów, z kodem QR weryfikacji.
+- **Powiadomienia push, które nie giną**: gdy telefon jest chwilowo niedostępny albo
+  Home Assistant właśnie się restartuje, push czeka w kolejce i jest ponawiany co minutę
+  (do 24 godzin). Każdy telefon dostaje go dokładnie raz.
 - **Powiadomienia push** o nowych fakturach zakupowych (opcjonalnie także sprzedażowych)
   na jeden albo kilka telefonów z aplikacją Home Assistanta lub przez inną usługę `notify`.
   Tapnięcie powiadomienia otwiera panel.
@@ -104,6 +107,12 @@ XML na godzinę, liczone na parę NIP + adres IP. Dlatego:
 - Pomijane są faktury, na których występujesz jako podmiot trzeci (np. płatnik,
   dodatkowy nabywca).
 - Pierwsza synchronizacja nie wysyła powiadomień, tylko zapamiętuje istniejące faktury.
+- Integracja jest przeznaczona dla firm z umiarkowaną liczbą faktur. Przy kilku
+  tysiącach faktur w dwóch miesiącach pełne pobranie listy przekracza godzinny limit
+  KSeF i synchronizacja może się nie kończyć. Przy ponad 10 000 faktur wystawionych
+  jednego dnia integracja zgłasza błąd.
+- Jeśli skonfigurujesz jednocześnie wpis produkcyjny i testowy, panel pokaże je razem,
+  oznaczy faktury testowe i nie wliczy ich do sum.
 
 ## Prywatność
 

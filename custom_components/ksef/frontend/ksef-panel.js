@@ -75,6 +75,10 @@ const STYLE = `
     background: var(--secondary-background-color); color: var(--secondary-text-color);
     margin-left: 6px; vertical-align: middle;
   }
+  .badge.env {
+    background: rgba(var(--rgb-warning-color, 255, 166, 0), .18);
+    color: var(--warning-color, #ffa600); font-weight: 500;
+  }
   .footer {
     display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px;
     padding: 12px; font-size: 13px; color: var(--secondary-text-color);
@@ -169,11 +173,19 @@ class KsefPanel extends HTMLElement {
     this._subscribe();
   }
 
-  // Integracja wysyła zdarzenie po każdym odświeżeniu - panel otwarty
-  // na stałe na tablecie nie musi być przeładowywany ręcznie.
+  // Integracja daje znać po każdym odświeżeniu - panel otwarty na stałe
+  // na tablecie nie musi być przeładowywany ręcznie. Własna komenda
+  // `ksef/subscribe` zamiast subscribeEvents: HA odrzuca subskrypcję zdarzeń
+  // spoza listy dozwolonych dla kont bez uprawnień administratora.
   _subscribe() {
     if (this._unsub || !this._hass?.connection) return;
-    this._unsub = this._hass.connection.subscribeEvents(() => this._load(), "ksef_updated");
+    const sub = this._hass.connection.subscribeMessage(() => this._load(), { type: "ksef/subscribe" });
+    this._unsub = sub;
+    sub.catch(() => {
+      // Np. starsza wersja integracji po stronie serwera - zwolnij miejsce,
+      // żeby kolejne podłączenie panelu mogło spróbować ponownie.
+      if (this._unsub === sub) this._unsub = null;
+    });
   }
 
   async _load() {
@@ -234,15 +246,20 @@ class KsefPanel extends HTMLElement {
     this._render();
     try {
       const url = await this._signedXmlUrl(entryId, ksefNumber);
+      // XML też przez fetch: przy błędzie (np. 429 - limit KSeF) pokazujemy
+      // komunikat, zamiast zapisać go na dysku jako plik .xml.
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`);
+      const xmlBlob = await resp.blob();
       if (format === "xml") {
-        this._save(url, `${ksefNumber}.xml`);
+        const objectUrl = URL.createObjectURL(xmlBlob);
+        this._save(objectUrl, `${ksefNumber}.xml`);
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
         return;
       }
       // PDF składa oficjalny generator MF (CIRFMF/ksef-pdf-generator) w
       // przeglądarce. Moduł ma ~3,5 MB, więc ładujemy go dopiero tutaj.
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(await resp.text() || `HTTP ${resp.status}`);
-      const xml = new File([await resp.blob()], `${ksefNumber}.xml`, { type: "application/xml" });
+      const xml = new File([xmlBlob], `${ksefNumber}.xml`, { type: "application/xml" });
       const base = this._panel?.config?.static_url || "/ksef_static";
       const version = this._panel?.config?.version || "";
       const lib = await import(`${base}/ksef-pdf-generator.js?v=${version}`);
@@ -290,6 +307,7 @@ class KsefPanel extends HTMLElement {
     const data = this._data;
     const months = data?.months || [];
     const invoices = this._invoices();
+    const mixed = !!data?.mixed_environments;
 
     const kindTabs = Object.entries(KIND_LABELS).map(([key, label]) => `
       <button class="tab ${key === this._kind ? "active" : ""}" data-kind="${key}">
@@ -315,7 +333,7 @@ class KsefPanel extends HTMLElement {
         <tr>
           <td class="date">${shortDate(inv.issue_date)}</td>
           <td>
-            <div class="party">${esc(inv.counterparty_name || "—")}${inv.invoice_type && inv.invoice_type !== "Vat" ? `<span class="badge">${esc(inv.invoice_type)}</span>` : ""}</div>
+            <div class="party">${esc(inv.counterparty_name || "—")}${inv.invoice_type && inv.invoice_type !== "Vat" ? `<span class="badge">${esc(inv.invoice_type)}</span>` : ""}${mixed && inv.environment !== "prod" ? `<span class="badge env">${esc(String(inv.environment).toUpperCase())}</span>` : ""}</div>
             <div class="sub">${inv.counterparty_nip ? `NIP ${esc(inv.counterparty_nip)}` : ""}</div>
           </td>
           <td>
@@ -331,9 +349,12 @@ class KsefPanel extends HTMLElement {
         </tr>`).join("");
 
       // Sumy tylko dla PLN - faktury walutowe pokazujemy, ale nie mieszamy kwot.
-      const pln = invoices.filter((inv) => !inv.currency || inv.currency === "PLN");
+      // Przy wpisie produkcyjnym i testowym naraz sumujemy samą produkcję.
+      const counted = mixed ? invoices.filter((inv) => inv.environment === "prod") : invoices;
+      const pln = counted.filter((inv) => !inv.currency || inv.currency === "PLN");
       const sum = (key) => pln.reduce((acc, inv) => acc + (Number(inv[key]) || 0), 0);
-      const foreign = invoices.length - pln.length;
+      const foreign = counted.length - pln.length;
+      const skippedEnv = invoices.length - counted.length;
 
       body = `
         <table>
@@ -347,7 +368,8 @@ class KsefPanel extends HTMLElement {
           <span>Razem: <strong>${invoices.length}</strong> ·
             netto <strong>${money(sum("net_amount"))}</strong> ·
             brutto <strong>${money(sum("gross_amount"))} zł</strong>
-            ${foreign ? ` (bez ${foreign} walutowych)` : ""}</span>
+            ${foreign ? ` (bez ${foreign} walutowych)` : ""}
+            ${skippedEnv ? ` (bez ${skippedEnv} testowych)` : ""}</span>
         </div>`;
     }
 

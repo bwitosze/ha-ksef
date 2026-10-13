@@ -387,7 +387,16 @@ class KsefApi:
             if data.get("isTruncated"):
                 # Limit 10 000 rekordów na zestaw filtrów - przesuwamy początek.
                 last = invoices[-1].get("issueDate")
-                body["dateRange"]["from"] = f"{last}T00:00:00+00:00"
+                new_from = f"{last}T00:00:00+00:00"
+                if new_from == body["dateRange"]["from"]:
+                    # Ponad 10 000 faktur z jedną datą wystawienia: data ma
+                    # rozdzielczość dnia, więc dalej się nie da - zamiast
+                    # w kółko pobierać te same strony, zgłaszamy błąd.
+                    raise KsefError(
+                        f"Ponad 10 000 faktur wystawionych {last} - "
+                        "integracja nie obsługuje takiego wolumenu"
+                    )
+                body["dateRange"]["from"] = new_from
                 page = 0
             else:
                 page += 1
