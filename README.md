@@ -1,11 +1,48 @@
 # KSeF dla Home Assistanta
 
-Nieoficjalna integracja Home Assistanta z **Krajowym Systemem e-Faktur (KSeF 2.0)**.
-Pokazuje Twoje faktury zakupowe i sprzedażowe w osobnym panelu w menu bocznym
-i wysyła push, gdy wpadnie nowa faktura zakupowa.
+## 📱 Push na telefon, gdy tylko wpadnie nowa faktura
 
-To nie jest program księgowy. Integracja daje tylko podgląd listy faktur
-z poprzedniego i bieżącego miesiąca oraz pobieranie plików.
+**Nowa faktura kosztowa w KSeF = powiadomienie na Twoim telefonie, najpóźniej po kwadransie.**
+Bez logowania do Aplikacji Podatnika, bez sprawdzania programu księgowego i bez
+czekania, aż księgowa da znać. Dostajesz w pushu kontrahenta, kwotę brutto, numer
+faktury i datę, a tapnięcie otwiera listę faktur z PDF-em gotowym do pobrania.
+
+```
+KSeF: Nowa faktura
+Orange Polska S.A.: 123,00 zł brutto
+F/12345/10/2026 z 07.10.2026
+```
+
+Push może iść na kilka telefonów naraz. Wybierasz je z listy w konfiguracji.
+
+To nieoficjalna integracja Home Assistanta z **Krajowym Systemem e-Faktur (KSeF 2.0)**.
+Poza pushami daje panel w menu bocznym z fakturami zakupowymi i sprzedażowymi
+z poprzedniego i bieżącego miesiąca. To nie jest program księgowy, tylko podgląd
+i powiadomienia.
+
+## ⚠️ Token KSeF wyłącznie do odczytu faktur
+
+Integracja loguje się **tokenem KSeF**. Generując go, zaznacz **tylko jedno uprawnienie:
+„przeglądanie faktur”**. Nic więcej nie jest potrzebne.
+
+Token z dodatkowymi uprawnieniami, np. „wystawianie faktur” albo „zarządzanie
+uprawnieniami”, pozwalałby każdemu, kto go zdobędzie (z kopii zapasowej Home Assistanta,
+przejętego serwera albo przez pomyłkę wklejony w niewłaściwe miejsce), **wystawiać faktury
+w Twoim imieniu albo nadawać innym dostęp do Twojego KSeF**. Token z samym odczytem
+ogranicza ewentualny wyciek do wglądu w faktury.
+
+Jak wygenerować token:
+
+1. Wejdź na **https://ap.ksef.mf.gov.pl** (Aplikacja Podatnika KSeF) i zaloguj się
+   przez login.gov.pl: profil zaufany, mObywatel, bank albo e-dowód.
+2. Wybierz kontekst swojego **NIP-u**.
+3. **Tokeny → Generuj token**. Nadaj nazwę, np. „Home Assistant”, i zaznacz
+   **tylko „przeglądanie faktur”**.
+4. Kliknij **Generuj token**, a gdy proces się zakończy, **Kopiuj**. Token jest pokazywany
+   **tylko raz** i zawiera znaki `|`, więc skopiuj go w całości.
+
+Token nie wygasa, dopóki go nie unieważnisz (Tokeny → Lista tokenów). Gdy KSeF
+go odrzuci, Home Assistant poprosi o nowy.
 
 ## Funkcje
 
@@ -14,7 +51,7 @@ z poprzedniego i bieżącego miesiąca oraz pobieranie plików.
 - **Pobieranie PDF i XML** każdej faktury. PDF generuje w przeglądarce oficjalny
   generator wizualizacji Ministerstwa Finansów, z kodem QR weryfikacji.
 - **Powiadomienia push** o nowych fakturach zakupowych (opcjonalnie także sprzedażowych)
-  przez dowolną usługę `notify`, np. aplikację mobilną Home Assistanta.
+  na jeden albo kilka telefonów z aplikacją Home Assistanta lub przez inną usługę `notify`.
   Tapnięcie powiadomienia otwiera panel.
 - **Zdarzenie `ksef_new_invoice`** dla własnych automatyzacji.
 - **Sensory**: liczba faktur zakupowych i sprzedażowych w bieżącym miesiącu,
@@ -34,26 +71,11 @@ z poprzedniego i bieżącego miesiąca oraz pobieranie plików.
 Skopiuj katalog `custom_components/ksef/` do `config/custom_components/` i zrestartuj
 Home Assistanta.
 
-## Token KSeF
-
-Integracja loguje się tokenem KSeF. Token generujesz raz:
-
-1. Wejdź na **https://ap.ksef.mf.gov.pl** (Aplikacja Podatnika KSeF) i zaloguj się
-   przez login.gov.pl: profil zaufany, mObywatel, bank albo e-dowód.
-2. Wybierz kontekst swojego **NIP-u**.
-3. **Tokeny → Generuj token**. Nadaj nazwę, np. „Home Assistant”, i zaznacz
-   **tylko „przeglądanie faktur”**. Inne uprawnienia nie są potrzebne.
-4. Kliknij **Generuj token**, a gdy proces się zakończy, **Kopiuj**. Token jest pokazywany
-   **tylko raz** i zawiera znaki `|`, więc skopiuj go w całości.
-
-Token nie wygasa, dopóki go nie unieważnisz (Tokeny → Lista tokenów). Gdy KSeF
-go odrzuci, Home Assistant poprosi o nowy.
-
 ## Konfiguracja
 
 Ustawienia → Urządzenia i usługi → **Dodaj integrację** → *KSeF*:
 
-- **NIP** i **token KSeF**.
+- **NIP** i **token KSeF** (tylko „przeglądanie faktur”, patrz wyżej).
 - **Środowisko**: Produkcja, Demo albo Testowe. Token działa tylko w środowisku,
   w którym został wygenerowany.
 - **Powiadomienia push**: lista rozwijana z telefonami, na których działa aplikacja
