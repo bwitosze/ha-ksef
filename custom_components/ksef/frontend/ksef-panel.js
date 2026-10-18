@@ -34,8 +34,13 @@ const STYLE = `
     padding: 6px 14px; font: inherit; font-size: 14px; cursor: pointer;
   }
   .toolbar button[disabled] { opacity: .5; cursor: default; }
-  .content { max-width: 1100px; margin: 0 auto; padding: 16px; box-sizing: border-box; }
-  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  /* Układ zależy od szerokości panelu, nie okna: przy otwartym menu bocznym
+     HA panel bywa dużo węższy niż ekran, więc @media tu nie wystarcza. */
+  .content {
+    max-width: 1100px; margin: 0 auto; padding: 16px; box-sizing: border-box;
+    container-type: inline-size;
+  }
+  .tabs { position: relative; display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
   .tabs + .tabs { margin-bottom: 16px; }
   .tab {
     background: var(--card-background-color);
@@ -54,7 +59,9 @@ const STYLE = `
     background: var(--card-background-color);
     border-radius: var(--ha-card-border-radius, 12px);
     border: var(--ha-card-border-width, 1px) solid var(--ha-card-border-color, var(--divider-color));
-    overflow: hidden;
+    /* auto zamiast hidden: gdyby tabela mimo wszystko się nie zmieściła,
+       da się ją przewinąć, zamiast tracić kolumny po prawej. */
+    overflow: auto;
   }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--divider-color); }
@@ -65,11 +72,14 @@ const STYLE = `
   tr:last-child td { border-bottom: none; }
   .party { font-weight: 500; }
   .sub { color: var(--secondary-text-color); font-size: 12px; margin-top: 2px; word-break: break-all; }
-  .dl a {
-    color: var(--primary-color); cursor: pointer; text-decoration: none;
-    font-size: 13px; margin-left: 10px;
+  .dl button {
+    background: transparent; color: var(--primary-color);
+    border: 1px solid var(--divider-color); border-radius: 14px;
+    padding: 4px 10px; margin-left: 6px; min-width: 48px;
+    font: inherit; font-size: 13px; font-weight: 500; cursor: pointer;
   }
-  .dl a:hover { text-decoration: underline; }
+  .dl button:hover { border-color: var(--primary-color); }
+  .dl button[disabled] { opacity: .6; cursor: default; }
   .badge {
     display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px;
     background: var(--secondary-background-color); color: var(--secondary-text-color);
@@ -93,8 +103,39 @@ const STYLE = `
   }
   @media (max-width: 700px) {
     .content { padding: 8px; }
+    .toolbar button { padding: 6px 10px; }
+  }
+  @container (max-width: 900px) {
     th.hide-narrow, td.hide-narrow { display: none; }
     th, td { padding: 8px; }
+  }
+  /* Telefon i wąski panel: każda faktura jako karta.
+       kontrahent      brutto
+       numer / KSeF    data
+       [ PDF ]  [ XML ]
+     Netto znika (jest w sumie pod listą). */
+  @container (max-width: 640px) {
+    .tabs.months { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+    .tabs.months::-webkit-scrollbar { display: none; }
+    .tabs.months .tab { flex: none; }
+    table, tbody { display: block; }
+    thead { display: none; }
+    tr {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto;
+      column-gap: 12px; row-gap: 4px;
+      padding: 12px; border-bottom: 1px solid var(--divider-color);
+    }
+    tr:last-child { border-bottom: none; }
+    td { display: block; padding: 0; border: none; }
+    /* Bez tego długie słowo bez spacji (nazwa firmy, numer) wyjeżdża poza
+       kolumnę i wchodzi pod kwotę brutto. */
+    td.who, td.no { overflow-wrap: anywhere; }
+    td.who { grid-column: 1; grid-row: 1; }
+    td.gross { grid-column: 2; grid-row: 1; font-weight: 500; }
+    td.no { grid-column: 1; grid-row: 2; }
+    td.date { grid-column: 2; grid-row: 2; text-align: right; font-size: 13px; color: var(--secondary-text-color); }
+    td.dl { grid-column: 1 / -1; grid-row: 3; display: flex; gap: 8px; margin-top: 6px; }
+    .dl button { flex: 1; margin: 0; padding: 9px 10px; font-size: 14px; }
   }
 `;
 
@@ -289,7 +330,9 @@ class KsefPanel extends HTMLElement {
 
   _link(format, inv) {
     const busy = this._busy?.has(`${inv.ksef_number}.${format}`);
-    return `<a data-dl="${format}" data-entry="${esc(inv.entry_id)}" data-ksef="${esc(inv.ksef_number)}">${busy ? "…" : format.toUpperCase()}</a>`;
+    // <button>, nie <a> bez href: tylko przycisk jest fokusowalny i na
+    // telefonie dostaje normalną obsługę dotyku.
+    return `<button data-dl="${format}" data-entry="${esc(inv.entry_id)}" data-ksef="${esc(inv.ksef_number)}"${busy ? " disabled" : ""}>${busy ? "…" : format.toUpperCase()}</button>`;
   }
 
   _invoices() {
@@ -332,16 +375,16 @@ class KsefPanel extends HTMLElement {
       const rows = invoices.map((inv) => `
         <tr>
           <td class="date">${shortDate(inv.issue_date)}</td>
-          <td>
+          <td class="who">
             <div class="party">${esc(inv.counterparty_name || "—")}${inv.invoice_type && inv.invoice_type !== "Vat" ? `<span class="badge">${esc(inv.invoice_type)}</span>` : ""}${mixed && inv.environment !== "prod" ? `<span class="badge env">${esc(String(inv.environment).toUpperCase())}</span>` : ""}</div>
             <div class="sub">${inv.counterparty_nip ? `NIP ${esc(inv.counterparty_nip)}` : ""}</div>
           </td>
-          <td>
+          <td class="no">
             <div>${esc(inv.invoice_number)}</div>
             <div class="sub">${esc(inv.ksef_number)}</div>
           </td>
           <td class="num hide-narrow">${money(inv.net_amount, inv.currency)}</td>
-          <td class="num">${money(inv.gross_amount, inv.currency)}</td>
+          <td class="num gross">${money(inv.gross_amount, inv.currency)}</td>
           <td class="dl">
             ${this._link("pdf", inv)}
             ${this._link("xml", inv)}
@@ -393,7 +436,7 @@ class KsefPanel extends HTMLElement {
       <div class="content">
         ${errors}
         <div class="tabs">${kindTabs}</div>
-        <div class="tabs">${monthTabs}</div>
+        <div class="tabs months">${monthTabs}</div>
         <div class="card">${body}</div>
         ${status}
       </div>`;
@@ -403,6 +446,15 @@ class KsefPanel extends HTMLElement {
     this._menuButton.hass = this._hass;
     this._menuButton.narrow = this._narrow;
     root.getElementById("menu").appendChild(this._menuButton);
+
+    // Na telefonie miesiące są jednym przewijanym paskiem - pokaż wybrany
+    // (domyślnie ostatni). scrollLeft, nie scrollIntoView: ten drugi
+    // przewinąłby też całą stronę do góry przy każdym odświeżeniu danych.
+    const strip = root.querySelector(".tabs.months");
+    const active = strip?.querySelector(".tab.active");
+    if (active && strip.scrollWidth > strip.clientWidth) {
+      strip.scrollLeft = active.offsetLeft - (strip.clientWidth - active.offsetWidth) / 2;
+    }
 
     root.getElementById("refresh").addEventListener("click", () => this._refresh());
     root.querySelectorAll("[data-kind]").forEach((el) =>
