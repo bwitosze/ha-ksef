@@ -1,5 +1,13 @@
 # KSeF dla Home Assistanta
 
+> **In English.** KSeF (Krajowy System e-Faktur) is Poland's mandatory national e-invoicing
+> system run by the Ministry of Finance: every B2B invoice in Poland is issued and received
+> through it. This unofficial integration reads your invoices from the KSeF 2.0 API with a
+> read-only token, sends a push notification to your phone when a new purchase invoice
+> arrives, and adds a sidebar panel listing purchase and sales invoices with PDF/XML
+> download (PDF rendered in the browser by the Ministry's official open-source generator).
+> It is aimed at Polish businesses, so the UI and the rest of this README are in Polish.
+
 ## 📱 Push na telefon, gdy tylko wpadnie nowa faktura
 
 **Nowa faktura kosztowa w KSeF = powiadomienie na Twoim telefonie, najpóźniej po kwadransie.**
